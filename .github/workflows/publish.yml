@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/django-modal-2fa
+      url: https://pypi.org/p/django-advanced-2fa
     permissions:
       id-token: write
     steps:

@@ -1,7 +1,7 @@
 /django_examples/django_examples/sendgrid.py
 /dist/
 /build/
-/django_modal_2fa.egg-info/
+/*.egg-info/
 /.idea/
 /django_examples/db.sqlite3
 *.pyc
