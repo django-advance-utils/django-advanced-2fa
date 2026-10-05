@@ -1,9 +1,14 @@
-[![PyPI version](https://badge.fury.io/py/django-modal-2fa.svg)](https://badge.fury.io/py/django-modal-2fa)
+[![PyPI version](https://img.shields.io/pypi/v/django-advanced-2fa)](https://pypi.org/project/django-advanced-2fa/)
 
-# django-modal-2fa
+# django-advanced-2fa
+
+The [django-advance-utils](https://github.com/django-advance-utils) line of Ian Jones's
+[django-modal-2fa](https://github.com/jonesim/django-2fa), forked so that it depends on the django-advance-utils
+packages instead of the originals. The Python package is still `modal_2fa`, so existing imports and
+`INSTALLED_APPS` entries do not change; only the pip name does.
 
 Drop-in two-factor authentication for Django, presented through Bootstrap modals
-(via [django-nested-modals](https://pypi.org/project/django-nested-modals/)).
+(via [django-advanced-modals](https://pypi.org/project/django-advanced-modals/)).
 It replaces the default admin login and adds TOTP, WebAuthn, trusted devices,
 brute-force lockout, email invites, and optional "Sign in with Microsoft".
 
@@ -21,15 +26,16 @@ brute-force lockout, email invites, and optional "Sign in with Microsoft".
 
 * Python ≥ 3.8
 * Django ≥ 4.2
-* Installed automatically: `django-nested-modals`, `django-otp`, `qrcode`, `webauthn`
+* Installed automatically: `ajax-advanced-helpers`, `django-advanced-menus`, `django-advanced-modals`,
+  `django-advanced-datatables`, `django-otp`, `qrcode`, `webauthn`
 
 ## Installation
 
-    pip install django-modal-2fa
+    pip install django-advanced-2fa
 
 For the optional Microsoft sign-in, install the extra (pulls in `msal`):
 
-    pip install "django-modal-2fa[microsoft]"
+    pip install "django-advanced-2fa[microsoft]"
 
 ### Settings
 

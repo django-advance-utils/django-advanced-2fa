@@ -1,11 +1,11 @@
 Django==5.0.4
 django-crispy-forms==1.14.0
-django-ajax-helpers==0.0.22
-django-filtered-datatables==0.0.21
+ajax-advanced-helpers==1.0.4
+django-advanced-datatables==1.0.0
 django-otp
 qrcode
-django-tab-menus==0.0.16
-django-nested-modals==0.0.24
+django-advanced-menus==1.0.0
+django-advanced-modals==1.0.0
 django-show-source-code==0.0.8
 Sphinx
 celery
