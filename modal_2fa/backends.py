@@ -2,10 +2,24 @@ from django.contrib.auth.backends import ModelBackend
 from django.contrib.auth import get_user_model
 from django_otp import user_has_device
 
-from .models import RememberDeviceCookie
+from .models import RememberDeviceCookie, WebauthnCredential
 from .utils import get_custom_auth
 
 UserModel = get_user_model()
+
+
+def has_second_factor(user, request=None):
+    """Whether ``user`` has set up a second factor: a confirmed OTP device, or a passkey.
+
+    django-otp's ``user_has_device`` knows nothing of WebAuthn credentials, so on its own it lets a user
+    whose only second factor is a passkey in on a password, wherever 2FA is optional for them.
+
+    A passkey counts under any rp id, not only this request's: where ``webauthn_rp_id`` varies by host, a user
+    reachable on two hosts would otherwise get in on a password on the one their passkey was not made for. There
+    they are refused instead (``Modal2FA`` offers neither a code nor enrolment to such a user), which fails closed.
+    ``request`` is unused, kept so callers can pass it if the rule ever comes to depend on the host.
+    """
+    return user_has_device(user) or WebauthnCredential.objects.filter(user=user).exists()
 
 
 class CookieBackend(ModelBackend):
@@ -54,7 +68,7 @@ class CookieBackend(ModelBackend):
             if RememberDeviceCookie.test_cookie(request, user, active=True):
                 request.session['authentication_method'] = 'cookie'
                 return user
-            elif not user_has_device(user) and self.customisation_class.user_2fa_optional(user):
+            elif not has_second_factor(user, request) and self.customisation_class.user_2fa_optional(user):
                 return user
             elif user:
                 self.set_part_login(request, user.username)

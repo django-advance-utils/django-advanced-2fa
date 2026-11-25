@@ -11,7 +11,7 @@ from django.urls import reverse
 
 from django.http import HttpResponse
 
-from django_modals.modals import ModalException
+from django_modals.modals.modals import ModalException
 from django_modals.processes import PROCESS_EDIT
 
 from modal_2fa.backends import CookieBackend
@@ -821,3 +821,320 @@ class RememberCookieFlagsTest(UserMixin, TestCase):
         assert morsel['secure']
         assert morsel['httponly']
         assert morsel['samesite'] == 'Lax'
+
+
+class ShortTrustCustomise(CustomiseAuth):
+    # Referenced by override_settings as 'examples.tests.ShortTrustCustomise'.
+    @staticmethod
+    def remember_days(user, request=None):
+        return 1
+
+
+class HostRpIdCustomise(CustomiseAuth):
+    # Referenced by override_settings as 'examples.tests.HostRpIdCustomise': the rp id is the request's host.
+    @staticmethod
+    def webauthn_rp_id(request):
+        return request.get_host().split(':')[0] if request else 'fallback.example'
+
+
+class RememberDaysTest(UserMixin, TestCase):
+    """A trusted device skips 2FA for remember_days from when it was trusted, checked on the server."""
+
+    def _request(self, cookie):
+        request = RequestFactory().get('/')
+        request.COOKIES[RememberDeviceCookie.cookie_name(cookie.user)] = f'{cookie.key}:{cookie.id}'
+        return request
+
+    def _cookie(self, age_days):
+        user = self.create_user()
+        cookie = RememberDeviceCookie.objects.create(user=user, key='abc', active=True)
+        RememberDeviceCookie.objects.filter(id=cookie.id).update(
+            created=cookie.created - datetime.timedelta(days=age_days))
+        cookie.refresh_from_db()
+        return cookie
+
+    def test_default_is_a_year(self):
+        cookie = self._cookie(age_days=364)
+        assert RememberDeviceCookie.test_cookie(self._request(cookie), cookie.user, active=True)
+        cookie = RememberDeviceCookie.objects.get(id=cookie.id)
+        RememberDeviceCookie.objects.filter(id=cookie.id).update(
+            created=cookie.created - datetime.timedelta(days=2))
+        assert not RememberDeviceCookie.test_cookie(self._request(cookie), cookie.user, active=True)
+
+    @override_settings(AUTHENTICATION_CUSTOMISATION='examples.tests.ShortTrustCustomise')
+    def test_a_cookie_older_than_remember_days_is_refused(self):
+        """The browser may keep the cookie; the server still stops trusting it on time."""
+        fresh = self._cookie(age_days=0)
+        assert RememberDeviceCookie.test_cookie(self._request(fresh), fresh.user, active=True)
+        RememberDeviceCookie.objects.filter(id=fresh.id).update(
+            created=fresh.created - datetime.timedelta(days=1, minutes=1))
+        assert not RememberDeviceCookie.test_cookie(self._request(fresh), fresh.user, active=True)
+
+    @override_settings(AUTHENTICATION_CUSTOMISATION='examples.tests.ShortTrustCustomise')
+    def test_cookie_expires_remember_days_after_it_was_trusted(self):
+        """Rotating the key on each use must not stretch the trust: the expiry follows ``created``."""
+        cookie = self._cookie(age_days=0)
+        response = HttpResponse()
+        cookie.set_cookie(response)
+        max_age = int(response.cookies[RememberDeviceCookie.cookie_name(cookie.user)]['max-age'])
+        from django.utils import timezone
+        expected = (cookie.created + datetime.timedelta(days=1) - timezone.now()).total_seconds()
+        assert abs(max_age - expected) <= 2
+
+    @override_settings(AUTHENTICATION_CUSTOMISATION='examples.tests.ShortTrustCustomise')
+    def test_rotating_the_key_does_not_stretch_the_trust(self):
+        cookie = self._cookie(age_days=0)
+        RememberDeviceCookie.objects.filter(id=cookie.id).update(
+            created=cookie.created - datetime.timedelta(hours=23))
+        cookie.refresh_from_db()
+        response = HttpResponse()
+        RememberDeviceCookie.update_cookie(cookie.user, self._request(cookie), response)
+        max_age = int(response.cookies[RememberDeviceCookie.cookie_name(cookie.user)]['max-age'])
+        assert 3600 - 5 <= max_age <= 3600 + 2  # the hour left of the day, neither a fresh day nor nothing
+
+
+@override_settings(AUTHENTICATION_CUSTOMISATION='examples.tests.HostRpIdCustomise', WEBAUTHN_RP_NAME='',
+                   ALLOWED_HOSTS=['.example.com'])
+class PerRequestRpIdTest(UserMixin, TestCase):
+    """The rp id comes from CustomiseAuth.webauthn_rp_id, per request."""
+
+    def _view(self, host):
+        view = WebAuthnMixin()
+        view.request = RequestFactory().get('/', HTTP_HOST=host)
+        return view
+
+    def test_rp_id_follows_the_request(self):
+        assert self._view('one.example.com').rp_id == 'one.example.com'
+        assert self._view('two.example.com:8000').rp_id == 'two.example.com'
+
+    def test_rp_name_falls_back_to_the_rp_id(self):
+        assert self._view('one.example.com').rp_name == 'one.example.com'
+
+    def test_only_this_hosts_passkeys_are_offered(self):
+        from modal_2fa.webauthn import get_user_authenticators
+
+        user = self.create_user()
+        for rp_id in ('one.example.com', 'two.example.com'):
+            WebauthnCredential.objects.create(user=user, rp_id=rp_id, credential_id=rp_id, sign_count=0)
+        request = RequestFactory().get('/', HTTP_HOST='one.example.com')
+        assert [c.rp_id for c in get_user_authenticators(user, request)] == ['one.example.com']
+
+    def test_rp_id_read_before_the_request_is_not_kept(self):
+        view = WebAuthnMixin()
+        assert view.rp_id == 'fallback.example'
+        view.request = RequestFactory().get('/', HTTP_HOST='one.example.com')
+        assert view.rp_id == 'one.example.com'
+
+    def test_an_assigned_rp_id_wins(self):
+        view = self._view('one.example.com')
+        view.rp_id = 'fixed.example'
+        assert view.rp_id == 'fixed.example'
+
+
+class PasskeyOnlyUserTest(UserMixin, TestCase):
+    """A passkey is a second factor: a user whose only one is a passkey must not get in on a password."""
+
+    def _authenticate(self):
+        request = RequestFactory().post('/auth/login/')
+        request.session = {}
+        return CookieBackend().authenticate(request, **test_user), request
+
+    def test_passkey_only_user_is_sent_to_the_second_factor(self):
+        user = self.create_user()
+        WebauthnCredential.objects.create(user=user, rp_id='localhost', credential_id='x', sign_count=0)
+        authenticated, request = self._authenticate()
+        assert authenticated is None
+        assert CookieBackend.get_part_login(request) == user.username
+
+    def test_a_passkey_for_another_host_still_counts(self):
+        """Where the rp id varies by host, a password on the host without the passkey must not be enough."""
+        user = self.create_user()
+        WebauthnCredential.objects.create(user=user, rp_id='elsewhere.example', credential_id='x', sign_count=0)
+        authenticated, request = self._authenticate()
+        assert authenticated is None
+        assert CookieBackend.get_part_login(request) == user.username
+
+    def test_the_2fa_step_does_not_enrol_an_authenticator_app_for_a_passkey_user(self):
+        """With only the password, scanning a fresh QR code at the 2FA step must not get a passkey user in."""
+        from django_otp.oath import TOTP
+        from django_otp.plugins.otp_totp.models import TOTPDevice
+
+        user = self.create_user()
+        WebauthnCredential.objects.create(user=user, rp_id='localhost', credential_id='eA', sign_count=0)
+        self.client.post(reverse('auth:login'), test_user)
+        page = self.client.get(reverse('auth:auth_2fa'))
+        assert b'<svg' not in page.content          # no QR code to scan
+        assert not TOTPDevice.objects.filter(user=user).exists()
+        # Even a device made behind the form's back, and its correct code, gets nowhere.
+        device = TOTPDevice.objects.create(user=user, confirmed=False)
+        token = TOTP(device.bin_key, device.step, device.t0, device.digits, device.drift).token()
+        self.client.post(reverse('auth:auth_2fa'), {'code': str(token).zfill(6)})
+        assert BACKEND_SESSION_KEY not in self.client.session
+        assert not TOTPDevice.objects.filter(user=user, confirmed=True).exists()
+
+
+class LandingCustomise(CustomiseAuth):
+    # Referenced by override_settings as 'examples.tests.LandingCustomise'.
+    @staticmethod
+    def login_redirect_url(request):
+        return '/landing/'
+
+
+class LoginRedirectUrlTest(TestCase):
+    """A full-page sign-in with no ?next= lands where CustomiseAuth.login_redirect_url says."""
+
+    def _response(self):
+        from modal_2fa.auth import SuccessRedirectMixin
+
+        view = SuccessRedirectMixin()
+        view.request = RequestFactory().post('/auth/2FA/', {'modal_type': 'no-parent'})
+        view.command_response = lambda command, **kwargs: (command, kwargs)
+        return view.success_response()
+
+    def test_default_is_the_setting(self):
+        assert self._response() == ('redirect', {'url': settings.LOGIN_REDIRECT_URL})
+
+    @override_settings(AUTHENTICATION_CUSTOMISATION='examples.tests.LandingCustomise')
+    def test_the_hook_decides(self):
+        assert self._response() == ('redirect', {'url': '/landing/'})
+
+
+XHR = dict(content_type='application/json', HTTP_X_REQUESTED_WITH='XMLHttpRequest')
+OTHER_USER = {'username': 'other@test.com', 'password': 'other-secret'}
+
+
+def _logged_in(client):
+    return BACKEND_SESSION_KEY in client.session
+
+
+class DeviceOwnershipTest(UserMixin, TestCase):
+    """A user's devices page changes that user's devices only, and only for a signed-in user."""
+
+    def _remove_passkey(self, client, credential):
+        return client.post(reverse('auth:user_devices'),
+                           data=json.dumps({'button': 'remove_webauthn', 'id': credential.id}), **XHR)
+
+    def test_nobody_else_can_remove_a_users_passkey(self):
+        victim = self.create_user()
+        credential = WebauthnCredential.objects.create(user=victim, rp_id='localhost', credential_id='eA',
+                                                       sign_count=0)
+        other = self.client_class()
+        other.force_login(self.create_user(**OTHER_USER))
+        self._remove_passkey(other, credential)
+        self._remove_passkey(self.client_class(), credential)  # signed out
+        assert WebauthnCredential.objects.filter(id=credential.id).exists()
+        # So the victim's password alone is still held at the second factor.
+        self.client.post(reverse('auth:login'), test_user)
+        assert not _logged_in(self.client)
+
+    def test_a_user_can_remove_their_own_passkey(self):
+        user = self.create_user()
+        credential = WebauthnCredential.objects.create(user=user, rp_id='localhost', credential_id='eA', sign_count=0)
+        self.client.force_login(user)
+        self._remove_passkey(self.client, credential)
+        assert not WebauthnCredential.objects.filter(id=credential.id).exists()
+
+    def test_nobody_else_can_remove_a_users_trusted_device(self):
+        victim = self.create_user()
+        cookie = RememberDeviceCookie.objects.create(user=victim, active=True, name='laptop')
+        other = self.client_class()
+        other.force_login(self.create_user(**OTHER_USER))
+        for url in ('auth:user_devices', 'auth:confirm_remember'):
+            other.post(reverse(url), data=json.dumps({'button': 'remove_device', 'id': cookie.id}), **XHR)
+        assert RememberDeviceCookie.objects.filter(id=cookie.id).exists()
+
+    def test_the_devices_page_is_for_a_signed_in_user(self):
+        response = self.client.get(reverse('auth:user_devices'))
+        assert response.status_code == 302
+
+
+class RememberAllowedTest(UserMixin, TestCase):
+    """A user the site does not let trust a device cannot trust one by posting to the step directly."""
+
+    def test_a_user_not_allowed_to_remember_cannot_trust_a_device(self):
+        # examples.customise.ExampleCustomise refuses "remember" to ian5.
+        user = self.create_user(username='ian5', password='ian5-secret')
+        self.client.force_login(user)
+        response = self.client.post(reverse('auth:confirm_remember'), {'name': 'laptop'}, HTTP_USER_AGENT='test')
+        assert response.status_code == 403
+        assert not RememberDeviceCookie.objects.filter(user=user).exists()
+
+
+@override_settings(AUTHENTICATION_CUSTOMISATION='examples.tests.ShortTrustCustomise')
+class ExpiredDevicesTest(UserMixin, TestCase):
+    """Devices whose trust has run out do not fill the max_cookies limit."""
+
+    def test_expired_devices_make_room_for_a_new_one(self):
+        user = self.create_TOTP_user()
+        for n in range(2):
+            cookie = RememberDeviceCookie.objects.create(user=user, active=True, name=f'old{n}')
+            RememberDeviceCookie.objects.filter(id=cookie.id).update(
+                created=cookie.created - datetime.timedelta(days=5))
+        self.client.force_login(user)
+        self.client.post(reverse('auth:confirm_remember'), {'name': 'new'}, HTTP_USER_AGENT='test')
+        assert list(RememberDeviceCookie.objects.filter(user=user).values_list('name', flat=True)) == ['new']
+
+    def test_a_device_still_trusted_is_kept(self):
+        user = self.create_TOTP_user()
+        RememberDeviceCookie.objects.create(user=user, active=True, name='current')
+        RememberDeviceCookie.remove_expired(user)
+        assert RememberDeviceCookie.objects.filter(user=user).count() == 1
+
+
+class Remove2FATest(UserMixin, TestCase):
+    """Remove 2FA removes every second factor, passkeys included."""
+
+    def test_remove_2fa_removes_passkeys_too(self):
+        user = self.create_TOTP_user()
+        WebauthnCredential.objects.create(user=user, rp_id='other.example', credential_id='eA', sign_count=0)
+        RememberDeviceCookie.objects.create(user=user, active=True, name='laptop')
+        self.client.force_login(user)
+        self.client.post(reverse('auth:remove_2fa'), data=json.dumps({'button': 'confirm'}), **XHR)
+        assert not WebauthnCredential.objects.filter(user=user).exists()
+        assert not user.totpdevice_set.exists()
+        assert not RememberDeviceCookie.objects.filter(user=user).exists()
+
+
+class SignedInAddsAnAppTest(UserMixin, TestCase):
+    """A signed-in user with a passkey may add an authenticator app; one signing in on a password may not."""
+
+    def test_a_signed_in_passkey_user_is_shown_a_qr_code(self):
+        user = self.create_user()
+        WebauthnCredential.objects.create(user=user, rp_id='localhost', credential_id='eA', sign_count=0)
+        self.client.force_login(user)
+        page = self.client.get(reverse('auth:auth_2fa'))
+        assert b'<svg' in page.content
+
+
+class PartLoginLockoutTest(UserMixin, TestCase):
+    """A half-finished login does not stop wrong passwords counting towards the lockout."""
+
+    def test_wrong_passwords_count_after_another_accounts_correct_one(self):
+        self.create_TOTP_user()  # its correct password parks a part login
+        victim = self.create_user(**OTHER_USER)
+        self.client.post(reverse('auth:login'), test_user)
+        assert self.client.session.get(CookieBackend.part_login_key) == test_user['username']
+        for n in range(3):
+            self.client.post(reverse('auth:login'), {'username': OTHER_USER['username'], 'password': f'wrong{n}'})
+        assert FailedLoginAttempt.objects.filter(user=victim).exists()
+
+    def test_the_part_login_is_cleared_once_signed_in(self):
+        from django_otp.oath import TOTP
+
+        user = self.create_TOTP_user()
+        device = user.totpdevice_set.get()
+        self.client.post(reverse('auth:login'), test_user)
+        assert self.client.session.get(CookieBackend.part_login_key) == user.username
+        token = TOTP(device.bin_key, device.step, device.t0, device.digits, device.drift).token()
+        self.client.post(reverse('auth:auth_2fa'), {'code': str(token).zfill(6)})
+        assert _logged_in(self.client)
+        assert CookieBackend.part_login_key not in self.client.session
+
+
+class MalformedCookieTest(UserMixin, TestCase):
+    def test_a_malformed_trusted_device_cookie_is_ignored(self):
+        user = self.create_TOTP_user()
+        self.client.cookies[RememberDeviceCookie.cookie_name(user)] = 'abc:notanint'
+        response = self.client.post(reverse('auth:login'), test_user)
+        assert response.status_code == 200
+        assert not _logged_in(self.client)

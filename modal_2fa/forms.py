@@ -67,6 +67,8 @@ class Form2FA(CrispyForm):
     code = CharField(widget=TextInput(attrs={'autocomplete': 'off'}))
     remember = BooleanField(label='Remember device', required=False)
 
+    passkey_only_message = 'This account signs in with a passkey. Use it on the device you registered it on.'
+
     @staticmethod
     def get_qr_code(device):
         img = qrcode.make(device.config_url, image_factory=SvgPathFillImage)
@@ -82,6 +84,12 @@ class Form2FA(CrispyForm):
             # submit button. Enforcement is in clean() -- this is just the UI.
             self.no_buttons = True
             return (HTML(f'<div class="alert alert-danger">{self.locked}</div>'),)
+        if self.device is None:
+            # The user's second factor is a passkey: no code to enter, and no authenticator app to set up here.
+            self.buttons += [self.button('Cancel', dict(function='post_modal', button='cancel'), self.cancel_class)]
+            for name in ('code', 'remember'):
+                self.fields.pop(name, None)
+            return (HTML(f'<p>{self.passkey_only_message}</p>'), HTML(web_authn_script()))
         if not self.device.confirmed:
             new_device = (HTML(render_to_string('modal_2fa/new_totp.html', {'svg': self.get_qr_code(self.device)})),
                           HTML(web_authn_script()))
@@ -102,6 +110,9 @@ class Form2FA(CrispyForm):
             # Server-side guard: reject even a crafted POST carrying a code while
             # locked, regardless of what post_init chose to render.
             raise ValidationError(self.locked)
+        if self.device is None:
+            # Server-side guard: with no TOTP device there is no code that can pass, whatever is posted.
+            raise ValidationError(self.passkey_only_message)
         if 'code' in self.cleaned_data:
             if not authenticate(self.request, device=self.device, token=self.cleaned_data['code']):
                 raise ValidationError('Incorrect Code')

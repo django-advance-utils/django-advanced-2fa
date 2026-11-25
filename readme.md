@@ -77,10 +77,12 @@ modals.
 
 1. The user submits credentials to `ModalLoginView`, verified by `CookieBackend`.
 2. If a valid trusted-device cookie is present → log in directly.
-3. Else if the user has no TOTP device and 2FA is optional for them → log in directly.
+3. Else if the user has no second factor (no OTP device and no passkey) and 2FA is optional for them → log in directly.
 4. Otherwise the username is parked in the session and the 2FA modal opens.
 5. `Modal2FA` verifies a TOTP code or a WebAuthn credential, then completes login.
-6. The user may optionally name and trust the device to skip 2FA next time.
+6. The user may optionally name and trust the device to skip 2FA next time. Trust lasts `remember_days`
+   (365 by default) from when the device was trusted; it is checked on the server and does not slide forward
+   with use.
 
 ## Lockout settings (optional)
 
@@ -189,7 +191,8 @@ Point `AUTHENTICATION_CUSTOMISATION` at a subclass of `CustomiseAuth`:
             view.size = 'md'                  # restyle any auth modal
 
 Common hooks: `user_2fa_optional`, `two_factor_enabled`, `password_login_allowed`,
-`allowed_remember`, `max_cookies`, `can_manage_users`, `can_manage_security`,
+`allowed_remember`, `max_cookies`, `remember_days`, `login_redirect_url`,
+`webauthn_rp_id`, `webauthn_rp_name`, `can_manage_users`, `can_manage_security`,
 `customise_view`, `override_views` (swap any URL→view mapping), and the email
 template attributes for invitations and password resets.
 
@@ -211,6 +214,37 @@ request — no trusted-device or device lookup, and no part-login parked in the
 session for auth views that aren't routed there to consume. Without it such a
 project has to leave `ModelBackend` behind `CookieBackend` as a fall-through, and
 then defend against that fall-through wherever 2FA *is* required.
+
+### One site on several hosts
+
+A passkey only works under the WebAuthn relying party id it was made with, and that id must be the
+request's host or a parent domain of it. Where one site serves 2FA on hosts with no common parent,
+work the rp id out per request (credentials are stored with theirs, so each host offers only its own):
+
+    class MyCustomise(CustomiseAuth):
+
+        @staticmethod
+        def webauthn_rp_id(request):
+            return request.get_host().split(':')[0] if request else settings.WEBAUTHN_RP_ID
+
+        @staticmethod
+        def remember_days(user, request=None):
+            return 30                                  # how long a trusted device skips 2FA
+
+        @staticmethod
+        def login_redirect_url(request):
+            return '/'                                 # where a sign-in with no ?next= lands
+
+A passkey counts as a second factor whichever host it was made on: on a host without it the user is
+held at the 2FA step rather than let in on a password.
+
+### Upgrading to 1.1
+
+- A device trusted more than `remember_days` ago (365 by default) is asked for 2FA again, and trust
+  no longer slides forward each time the device is used. Override `remember_days` to change the length.
+- A passkey is now a second factor where 2FA is optional: a user whose only one is a passkey is asked
+  for it instead of getting in on a password.
+- Remove 2FA removes the user's passkeys as well as their authenticator app and trusted devices.
 
 ### Who may manage users and security
 

@@ -6,7 +6,7 @@ from django.contrib.auth import login as auth_login, logout as auth_logout
 from django.contrib.auth import get_user_model, authenticate
 from django.contrib.auth.views import PasswordResetConfirmView, LoginView, PasswordResetView, PasswordChangeView
 from django.db.models import ObjectDoesNotExist
-from django.http import HttpResponseRedirect
+from django.http import HttpResponseForbidden, HttpResponseRedirect
 from django.urls import reverse
 from django.utils.http import urlencode
 from django.utils.safestring import mark_safe
@@ -19,7 +19,7 @@ from django_modals.helper import modal_button_method, modal_button, ajax_modal_r
 
 from django_modals.modals import FormModal, Modal
 
-from .backends import CookieBackend
+from .backends import CookieBackend, has_second_factor
 from .models import RememberDeviceCookie, FailedLoginAttempt, WebauthnCredential
 from .utils import get_client_ip_address, get_cookie_backend_path, get_custom_auth, safe_redirect_url
 from .forms import CrispyPasswordChangeForm, CrispyPasswordResetForm, CrispySetPasswordForm, CrispyLoginForm, Form2FA,\
@@ -54,7 +54,7 @@ class SuccessRedirectMixin:
             return self.command_response('redirect', url=safe_next)
         elif self.request.POST.get('modal_type') == 'no-parent':
             # noinspection PyUnresolvedReferences
-            return self.command_response('redirect', url=settings.LOGIN_REDIRECT_URL)
+            return self.command_response('redirect', url=get_custom_auth().login_redirect_url(self.request))
         else:
             # noinspection PyUnresolvedReferences
             return self.command_response('reload')
@@ -120,10 +120,30 @@ class UserInvite(ModalPasswordResetView):
                 mark_safe(f'<p>Welcome {self.user.username}</p>')}
 
 
-class ConfirmCookieModal(CustomiseMixin, SuccessRedirectMixin, FormModal):
+class SignedInMixin:
+    """Only for a signed-in user: these views change that user's own devices."""
+
+    def dispatch(self, request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            if is_ajax(request):
+                return HttpResponseForbidden()
+            return HttpResponseRedirect(reverse('auth:login'))
+        return super().dispatch(request, *args, **kwargs)
+
+
+class ConfirmCookieModal(SignedInMixin, CustomiseMixin, SuccessRedirectMixin, FormModal):
 
     form_class = RememberCookieForm
     modal_title = 'Name device'
+
+    def dispatch(self, request, *args, **kwargs):
+        # Trusting a device skips the second factor from then on, so whether the user may is checked here, not only
+        # by the code step leaving the "remember" box off its form.
+        if request.user.is_authenticated:
+            if not get_custom_auth().allowed_remember(request.user):
+                return HttpResponseForbidden()
+            RememberDeviceCookie.remove_expired(request.user, request)
+        return super().dispatch(request, *args, **kwargs)
 
     def form_valid(self, form):
         remember_cookie = RememberDeviceCookie(
@@ -132,7 +152,7 @@ class ConfirmCookieModal(CustomiseMixin, SuccessRedirectMixin, FormModal):
         )
         remember_cookie.save()
         response = self.success_response()
-        remember_cookie.set_cookie(response)
+        remember_cookie.set_cookie(response, self.request)
         return response
 
     def get_context_data(self, **kwargs):
@@ -145,15 +165,16 @@ class ConfirmCookieModal(CustomiseMixin, SuccessRedirectMixin, FormModal):
         return context
 
     def button_remove_device(self, **_kwargs):
-        RememberDeviceCookie.objects.get(id=self.request.POST['id']).delete()
+        RememberDeviceCookie.objects.filter(id=self.request.POST.get('id'), user=self.request.user).delete()
         return self.button_refresh_modal(whole_modal=True)
 
 
-class UserDevices(WebAuthnMixin, AjaxMessagesMixin, CustomiseMixin, Modal):
+class UserDevices(SignedInMixin, WebAuthnMixin, AjaxMessagesMixin, CustomiseMixin, Modal):
 
     modal_title = 'Authorised Devices'
 
     def modal_content(self):
+        RememberDeviceCookie.remove_expired(self.request.user, self.request)
         cookies = RememberDeviceCookie.objects.filter(user=self.request.user, active=True)
         return (render_to_string('modal_2fa/database_cookies.html', dict(no_title=True, cookies=cookies))
                 + render_to_string('modal_2fa/webauthn_devices.html',
@@ -161,14 +182,16 @@ class UserDevices(WebAuthnMixin, AjaxMessagesMixin, CustomiseMixin, Modal):
                 + web_authn_script())
 
     def button_remove_device(self, **_kwargs):
-        RememberDeviceCookie.objects.get(id=self.request.POST['id']).delete()
+        RememberDeviceCookie.objects.filter(id=self.request.POST.get('id'), user=self.request.user).delete()
         return self.button_refresh_modal()
 
     def button_add_webauthn(self, **kwargs):
         return self.command_response(self.registration_command(self.request.user))
 
     def button_remove_webauthn(self, id, **_kwargs):
-        WebauthnCredential.objects.filter(id=id).delete()
+        # The user's own only: with a passkey as the only second factor, deleting someone else's would leave them on
+        # their password alone.
+        WebauthnCredential.objects.filter(id=id, user=self.request.user).delete()
         return self.command_response('reload')
 
     def get_modal_buttons(self):
@@ -177,14 +200,14 @@ class UserDevices(WebAuthnMixin, AjaxMessagesMixin, CustomiseMixin, Modal):
                 modal_button('Cancel', 'close', 'btn-secondary', font_awesome='fas fa-times')]
 
 
-class Modal2FARemove(CustomiseMixin, Modal):
+class Modal2FARemove(SignedInMixin, CustomiseMixin, Modal):
 
     modal_title = 'Remove 2FA'
 
     def button_confirm(self, **_kwargs):
-        device = TOTPDevice.objects.filter(user=self.request.user).first()
-        if device:
-            device.delete()
+        # Every second factor: a passkey left behind still counts as one, so the user would still be asked for it.
+        TOTPDevice.objects.filter(user=self.request.user).delete()
+        WebauthnCredential.objects.filter(user=self.request.user).delete()
         RememberDeviceCookie.objects.filter(user=self.request.user).delete()
         self.request.session.pop('authentication_method', None)
         return self.command_response('reload')
@@ -205,6 +228,7 @@ class Modal2FA(WebAuthnMixin, AjaxMessagesMixin, CustomiseMixin, SuccessRedirect
         super().__init__(*args, **kwargs)
         self.user = None
         self._locked = False
+        self._signing_in = False
 
     def dispatch(self, request, *args, **kwargs):
         if CookieBackend.get_part_login(request):
@@ -212,6 +236,7 @@ class Modal2FA(WebAuthnMixin, AjaxMessagesMixin, CustomiseMixin, SuccessRedirect
             # already-authenticated one (e.g. opening admin while still signed in
             # via Microsoft). Drop the stale session so 2FA completes as the right
             # user and auth_login doesn't flush the new authentication_method.
+            self._signing_in = True
             try:
                 self.user = CookieBackend.get_part_login_user(request)
             except ObjectDoesNotExist:
@@ -243,6 +268,7 @@ class Modal2FA(WebAuthnMixin, AjaxMessagesMixin, CustomiseMixin, SuccessRedirect
             return self.error_message(self._locked)
         if self.check_authentication(self.user):
             FailedLoginAttempt.clear_failed_attempts(self.request, self.user, use_ip=False)
+            CookieBackend.delete_part_login(self.request)
             auth_login(self.request, self.user, backend=get_cookie_backend_path())
             self.request.session['authentication_method'] = '2fa'
             return self.success_response()
@@ -253,11 +279,24 @@ class Modal2FA(WebAuthnMixin, AjaxMessagesMixin, CustomiseMixin, SuccessRedirect
         return self.error_message(f'Could not log in with credential<br>{self.last_error}')
 
     def get_device(self):
+        """The TOTP device whose code this step takes, or None when it must take a passkey only.
+
+        While signing in, a user with no TOTP device is shown a new one's QR code to enrol, but only a user with no
+        second factor at all: one whose second factor is a passkey would otherwise be enrolled here by whoever holds
+        their password, which is the password alone getting in. A user already signed in may add an app beside a
+        passkey.
+        """
+        guard = self._signing_in and has_second_factor(self.user)
         device = TOTPDevice.objects.filter(user=self.user).first()
         if self.request.method != 'POST' and device and not device.confirmed:
             device.delete()
             device = None
+        if device and not device.confirmed and guard:
+            device.delete()
+            device = None
         if not device:
+            if guard:
+                return None
             device = TOTPDevice(user=self.user, confirmed=False)
             device.save()
         return device
@@ -289,6 +328,7 @@ class Modal2FA(WebAuthnMixin, AjaxMessagesMixin, CustomiseMixin, SuccessRedirect
 
     def form_valid(self, form):
         FailedLoginAttempt.clear_failed_attempts(self.request, self.user, use_ip=False)
+        CookieBackend.delete_part_login(self.request)
         auth_login(self.request, self.user, backend=get_cookie_backend_path())
         if form.cleaned_data.get('remember'):
             return self.command_response(ajax_modal_replace(self.request, 'auth:confirm_remember',
@@ -342,7 +382,7 @@ class ModalLoginView(CustomiseMixin, SuccessRedirectMixin, FormModal, LoginView)
         return self.command_response('reload')
 
     def form_invalid(self, form):
-        if CookieBackend.get_part_login(self.request):
+        if CookieBackend.get_part_login(self.request):  # made by this POST: dispatch clears any older one
             # Correct password, advancing to 2FA: don't add an attempt (the
             # password was right), but don't clear the counter either -- prior
             # failures must carry into the 2FA stage so its throttle isn't reset.
@@ -356,6 +396,9 @@ class ModalLoginView(CustomiseMixin, SuccessRedirectMixin, FormModal, LoginView)
 
     def dispatch(self, request, *args, **kwargs):
         if 'username' in request.POST:
+            # A part login left from an earlier attempt must not stand for this one: form_invalid takes one as "the
+            # password was right", and would stop counting failures for whatever password is tried now.
+            CookieBackend.delete_part_login(request)
             self._user = UserModel.objects.filter(username=self.request.POST['username']).first()
             # Logging in as a different user while already authenticated: drop the
             # current session first so the new login (and any 2FA step) can't bind

@@ -39,22 +39,40 @@ class RememberDeviceCookie(models.Model):
         if key:
             if ':' not in key:
                 return RememberDeviceCookie.objects.filter(key=key, user=user, **kwargs).first()
-            else:
-                return RememberDeviceCookie.objects.filter(id=key.split(':')[1], user=user, **kwargs).first()
+            cookie_id = key.split(':')[1]
+            if not (cookie_id.isascii() and cookie_id.isdigit()):
+                return None
+            return RememberDeviceCookie.objects.filter(id=cookie_id, user=user, **kwargs).first()
+
+    def trusted_until(self, request=None):
+        """When this device stops skipping 2FA: ``CustomiseAuth.remember_days`` after it was trusted."""
+        created = self.created or timezone.now()
+        return created + datetime.timedelta(days=get_custom_auth().remember_days(self.user, request))
+
+    @classmethod
+    def remove_expired(cls, user, request=None):
+        """Delete ``user``'s devices whose trust has run out, so they stop filling the ``max_cookies`` limit."""
+        now = timezone.now()
+        expired = [device.id for device in cls.objects.filter(user=user) if now >= device.trusted_until(request)]
+        if expired:
+            cls.objects.filter(id__in=expired).delete()
 
     @classmethod
     def test_cookie(cls, request, user, **kwargs):
         stored = cls.cookie_object(request, user, **kwargs)
-        if stored and stored.key == RememberDeviceCookie.cookie_key(request, user).split(':')[0]:
+        if (stored and stored.key == RememberDeviceCookie.cookie_key(request, user).split(':')[0]
+                and timezone.now() < stored.trusted_until(request)):
             return True
         return False
 
-    def set_cookie(self, response):
+    def set_cookie(self, response, request=None):
         # This is a 2FA-bypass token: keep it out of JS (httponly) and off
         # cross-site requests (samesite) in addition to https-only (secure).
+        # A max-age, worked out on our own clock, rather than an expiry date: Django reads a naive date as UTC, so
+        # with USE_TZ off and a TIME_ZONE that is not UTC the browser's expiry would be out by the offset.
         response.set_cookie(RememberDeviceCookie.cookie_name(self.user), value=f'{self.key}:{self.id}', secure=True,
                             httponly=True, samesite='Lax',
-                            expires=timezone.now() + datetime.timedelta(days=365))
+                            max_age=max(0, int((self.trusted_until(request) - timezone.now()).total_seconds())))
 
     @staticmethod
     def update_cookie(user, request, response):
@@ -62,7 +80,7 @@ class RememberDeviceCookie(models.Model):
         if remember_cookie:
             remember_cookie.key = random_string()
             remember_cookie.save()
-            remember_cookie.set_cookie(response)
+            remember_cookie.set_cookie(response, request)
 
 
 class WebauthnCredential(models.Model):
