@@ -40,7 +40,7 @@ class RememberDeviceCookie(models.Model):
             if ':' not in key:
                 return RememberDeviceCookie.objects.filter(key=key, user=user, **kwargs).first()
             cookie_id = key.split(':')[1]
-            if not cookie_id.isdigit():
+            if not (cookie_id.isascii() and cookie_id.isdigit()):
                 return None
             return RememberDeviceCookie.objects.filter(id=cookie_id, user=user, **kwargs).first()
 
