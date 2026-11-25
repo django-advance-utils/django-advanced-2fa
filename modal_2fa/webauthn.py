@@ -130,7 +130,10 @@ class WebAuthnMixin:
         return True
 
     def get_origin(self):
-        if not self.request.is_secure() and self.request.get_host().startswith('localhost'):
+        # Browsers allow a passkey over plain http only on localhost and its subdomains (a dev site served on
+        # tenant.app.localhost, say); anywhere else the page is https.
+        host = self.request.get_host().split(':')[0]
+        if not self.request.is_secure() and (host == 'localhost' or host.endswith('.localhost')):
             return 'http://' + self.request.get_host()
         return 'https://' + self.request.get_host()
 
