@@ -1138,3 +1138,20 @@ class MalformedCookieTest(UserMixin, TestCase):
         response = self.client.post(reverse('auth:login'), test_user)
         assert response.status_code == 200
         assert not _logged_in(self.client)
+
+
+class WebAuthnOriginTest(TestCase):
+    """The origin a passkey is checked against: http only on localhost and its subdomains."""
+
+    def _origin(self, host, secure=False):
+        view = WebAuthnMixin()
+        view.request = RequestFactory().get('/', HTTP_HOST=host, secure=secure)
+        return view.get_origin()
+
+    @override_settings(ALLOWED_HOSTS=['*'])
+    def test_origins(self):
+        assert self._origin('localhost:8000') == 'http://localhost:8000'
+        assert self._origin('tenant.app.localhost:8001') == 'http://tenant.app.localhost:8001'
+        assert self._origin('example.com') == 'https://example.com'
+        assert self._origin('localhost.example.com') == 'https://localhost.example.com'
+        assert self._origin('tenant.app.localhost', secure=True) == 'https://tenant.app.localhost'
