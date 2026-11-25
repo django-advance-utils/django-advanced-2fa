@@ -39,13 +39,23 @@ class RememberDeviceCookie(models.Model):
         if key:
             if ':' not in key:
                 return RememberDeviceCookie.objects.filter(key=key, user=user, **kwargs).first()
-            else:
-                return RememberDeviceCookie.objects.filter(id=key.split(':')[1], user=user, **kwargs).first()
+            cookie_id = key.split(':')[1]
+            if not cookie_id.isdigit():
+                return None
+            return RememberDeviceCookie.objects.filter(id=cookie_id, user=user, **kwargs).first()
 
     def trusted_until(self, request=None):
         """When this device stops skipping 2FA: ``CustomiseAuth.remember_days`` after it was trusted."""
         created = self.created or timezone.now()
         return created + datetime.timedelta(days=get_custom_auth().remember_days(self.user, request))
+
+    @classmethod
+    def remove_expired(cls, user, request=None):
+        """Delete ``user``'s devices whose trust has run out, so they stop filling the ``max_cookies`` limit."""
+        now = timezone.now()
+        expired = [device.id for device in cls.objects.filter(user=user) if now >= device.trusted_until(request)]
+        if expired:
+            cls.objects.filter(id__in=expired).delete()
 
     @classmethod
     def test_cookie(cls, request, user, **kwargs):

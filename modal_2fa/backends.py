@@ -17,7 +17,7 @@ def has_second_factor(user, request=None):
     A passkey counts under any rp id, not only this request's: where ``webauthn_rp_id`` varies by host, a user
     reachable on two hosts would otherwise get in on a password on the one their passkey was not made for. There
     they are refused instead (``Modal2FA`` offers neither a code nor enrolment to such a user), which fails closed.
-    ``request`` is accepted for the projects that override this.
+    ``request`` is unused, kept so callers can pass it if the rule ever comes to depend on the host.
     """
     return user_has_device(user) or WebauthnCredential.objects.filter(user=user).exists()
 

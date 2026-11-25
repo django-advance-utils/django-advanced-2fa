@@ -286,7 +286,7 @@ class MsCallbackView(MsAuthMixin, View):
             # Keep the verified ID-token claims so consumers can inspect them later
             # (cleared automatically on logout when the session is flushed).
             request.session['ms_claims'] = claims
-            return HttpResponseRedirect(next_url or settings.LOGIN_REDIRECT_URL)
+            return HttpResponseRedirect(next_url or get_custom_auth().login_redirect_url(request))
 
         # MFA not proven by the token: fall through to the normal 2FA step.
         CookieBackend.set_part_login(request, user.username)
