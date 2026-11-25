@@ -58,9 +58,11 @@ class RememberDeviceCookie(models.Model):
     def set_cookie(self, response, request=None):
         # This is a 2FA-bypass token: keep it out of JS (httponly) and off
         # cross-site requests (samesite) in addition to https-only (secure).
+        # A max-age, worked out on our own clock, rather than an expiry date: Django reads a naive date as UTC, so
+        # with USE_TZ off and a TIME_ZONE that is not UTC the browser's expiry would be out by the offset.
         response.set_cookie(RememberDeviceCookie.cookie_name(self.user), value=f'{self.key}:{self.id}', secure=True,
                             httponly=True, samesite='Lax',
-                            expires=self.trusted_until(request))
+                            max_age=max(0, int((self.trusted_until(request) - timezone.now()).total_seconds())))
 
     @staticmethod
     def update_cookie(user, request, response):

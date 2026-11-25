@@ -876,9 +876,22 @@ class RememberDaysTest(UserMixin, TestCase):
         cookie = self._cookie(age_days=0)
         response = HttpResponse()
         cookie.set_cookie(response)
-        expires = response.cookies[RememberDeviceCookie.cookie_name(cookie.user)]['expires']
-        expected = cookie.created + datetime.timedelta(days=1)
-        assert expires == expected.strftime('%a, %d %b %Y %H:%M:%S GMT')
+        max_age = int(response.cookies[RememberDeviceCookie.cookie_name(cookie.user)]['max-age'])
+        from django.utils import timezone
+        expected = (cookie.created + datetime.timedelta(days=1) - timezone.now()).total_seconds()
+        assert abs(max_age - expected) <= 2
+
+    @override_settings(AUTHENTICATION_CUSTOMISATION='examples.tests.ShortTrustCustomise')
+    def test_rotating_the_key_does_not_stretch_the_trust(self):
+        cookie = self._cookie(age_days=0)
+        RememberDeviceCookie.objects.filter(id=cookie.id).update(
+            created=cookie.created - datetime.timedelta(hours=23))
+        cookie.refresh_from_db()
+        response = HttpResponse()
+        RememberDeviceCookie.update_cookie(cookie.user, self._request(cookie), response)
+        max_age = int(response.cookies[RememberDeviceCookie.cookie_name(cookie.user)]['max-age'])
+        from django.utils import timezone
+        assert max_age <= 3600 + 2
 
 
 @override_settings(AUTHENTICATION_CUSTOMISATION='examples.tests.HostRpIdCustomise', WEBAUTHN_RP_NAME='',
@@ -907,6 +920,12 @@ class PerRequestRpIdTest(UserMixin, TestCase):
         request = RequestFactory().get('/', HTTP_HOST='one.example.com')
         assert [c.rp_id for c in get_user_authenticators(user, request)] == ['one.example.com']
 
+    def test_rp_id_read_before_the_request_is_not_kept(self):
+        view = WebAuthnMixin()
+        assert view.rp_id == 'fallback.example'
+        view.request = RequestFactory().get('/', HTTP_HOST='one.example.com')
+        assert view.rp_id == 'one.example.com'
+
     def test_an_assigned_rp_id_wins(self):
         view = self._view('one.example.com')
         view.rp_id = 'fixed.example'
@@ -928,11 +947,31 @@ class PasskeyOnlyUserTest(UserMixin, TestCase):
         assert authenticated is None
         assert CookieBackend.get_part_login(request) == user.username
 
-    def test_a_passkey_for_another_host_does_not_count(self):
+    def test_a_passkey_for_another_host_still_counts(self):
+        """Where the rp id varies by host, a password on the host without the passkey must not be enough."""
         user = self.create_user()
         WebauthnCredential.objects.create(user=user, rp_id='elsewhere.example', credential_id='x', sign_count=0)
-        authenticated, _request = self._authenticate()
-        assert authenticated == user
+        authenticated, request = self._authenticate()
+        assert authenticated is None
+        assert CookieBackend.get_part_login(request) == user.username
+
+    def test_the_2fa_step_does_not_enrol_an_authenticator_app_for_a_passkey_user(self):
+        """With only the password, scanning a fresh QR code at the 2FA step must not get a passkey user in."""
+        from django_otp.oath import TOTP
+        from django_otp.plugins.otp_totp.models import TOTPDevice
+
+        user = self.create_user()
+        WebauthnCredential.objects.create(user=user, rp_id='localhost', credential_id='eA', sign_count=0)
+        self.client.post(reverse('auth:login'), test_user)
+        page = self.client.get(reverse('auth:auth_2fa'))
+        assert b'<svg' not in page.content          # no QR code to scan
+        assert not TOTPDevice.objects.filter(user=user).exists()
+        # Even a device made behind the form's back, and its correct code, gets nowhere.
+        device = TOTPDevice.objects.create(user=user, confirmed=False)
+        token = TOTP(device.bin_key, device.step, device.t0, device.digits, device.drift).token()
+        self.client.post(reverse('auth:auth_2fa'), {'code': str(token).zfill(6)})
+        assert BACKEND_SESSION_KEY not in self.client.session
+        assert not TOTPDevice.objects.filter(user=user, confirmed=True).exists()
 
 
 class LandingCustomise(CustomiseAuth):

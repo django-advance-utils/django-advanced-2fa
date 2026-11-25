@@ -19,7 +19,7 @@ from django_modals.helper import modal_button_method, modal_button, ajax_modal_r
 
 from django_modals.modals import FormModal, Modal
 
-from .backends import CookieBackend
+from .backends import CookieBackend, has_second_factor
 from .models import RememberDeviceCookie, FailedLoginAttempt, WebauthnCredential
 from .utils import get_client_ip_address, get_cookie_backend_path, get_custom_auth, safe_redirect_url
 from .forms import CrispyPasswordChangeForm, CrispyPasswordResetForm, CrispySetPasswordForm, CrispyLoginForm, Form2FA,\
@@ -253,11 +253,22 @@ class Modal2FA(WebAuthnMixin, AjaxMessagesMixin, CustomiseMixin, SuccessRedirect
         return self.error_message(f'Could not log in with credential<br>{self.last_error}')
 
     def get_device(self):
+        """The TOTP device whose code this step takes, or None when it must take a passkey only.
+
+        A user with no TOTP device is shown a new one's QR code to enrol, but only a user with no second factor at
+        all: one whose second factor is a passkey would otherwise be enrolled here by whoever holds their password,
+        which is the password alone getting in.
+        """
         device = TOTPDevice.objects.filter(user=self.user).first()
         if self.request.method != 'POST' and device and not device.confirmed:
             device.delete()
             device = None
+        if device and not device.confirmed and has_second_factor(self.user):
+            device.delete()
+            device = None
         if not device:
+            if has_second_factor(self.user):
+                return None
             device = TOTPDevice(user=self.user, confirmed=False)
             device.save()
         return device

@@ -53,8 +53,12 @@ class WebAuthnMixin:
     # than one rp id: CustomiseAuth.webauthn_rp_id decides. Assigning either one fixes it for this view.
     @property
     def rp_id(self):
-        if '_rp_id' not in self.__dict__:
-            self._rp_id = get_rp_id(getattr(self, 'request', None))
+        if '_rp_id' in self.__dict__:
+            return self._rp_id
+        request = getattr(self, 'request', None)
+        if request is None:
+            return get_rp_id(None)   # not cached: it would stick once the request is set
+        self._rp_id = get_rp_id(request)
         return self._rp_id
 
     @rp_id.setter
@@ -63,8 +67,12 @@ class WebAuthnMixin:
 
     @property
     def rp_name(self):
-        if '_rp_name' not in self.__dict__:
-            self._rp_name = get_rp_name(getattr(self, 'request', None))
+        if '_rp_name' in self.__dict__:
+            return self._rp_name
+        request = getattr(self, 'request', None)
+        if request is None:
+            return get_rp_name(None)   # not cached: it would stick once the request is set
+        self._rp_name = get_rp_name(request)
         return self._rp_name
 
     @rp_name.setter
