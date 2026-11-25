@@ -8,6 +8,17 @@ from .utils import get_custom_auth
 UserModel = get_user_model()
 
 
+def has_second_factor(user, request=None):
+    """Whether ``user`` has set up a second factor: a confirmed OTP device, or a passkey for this request's rp id.
+
+    django-otp's ``user_has_device`` knows nothing of WebAuthn credentials, so on its own it lets a user
+    whose only second factor is a passkey in on a password, wherever 2FA is optional for them.
+    """
+    from .webauthn import get_user_authenticators   # here: webauthn pulls in the optional webauthn package
+
+    return user_has_device(user) or get_user_authenticators(user, request).exists()
+
+
 class CookieBackend(ModelBackend):
 
     part_login_key = 'part_login'
@@ -54,7 +65,7 @@ class CookieBackend(ModelBackend):
             if RememberDeviceCookie.test_cookie(request, user, active=True):
                 request.session['authentication_method'] = 'cookie'
                 return user
-            elif not user_has_device(user) and self.customisation_class.user_2fa_optional(user):
+            elif not has_second_factor(user, request) and self.customisation_class.user_2fa_optional(user):
                 return user
             elif user:
                 self.set_part_login(request, user.username)

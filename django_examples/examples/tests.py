@@ -911,3 +911,25 @@ class PerRequestRpIdTest(UserMixin, TestCase):
         view = self._view('one.example.com')
         view.rp_id = 'fixed.example'
         assert view.rp_id == 'fixed.example'
+
+
+class PasskeyOnlyUserTest(UserMixin, TestCase):
+    """A passkey is a second factor: a user whose only one is a passkey must not get in on a password."""
+
+    def _authenticate(self):
+        request = RequestFactory().post('/auth/login/')
+        request.session = {}
+        return CookieBackend().authenticate(request, **test_user), request
+
+    def test_passkey_only_user_is_sent_to_the_second_factor(self):
+        user = self.create_user()
+        WebauthnCredential.objects.create(user=user, rp_id='localhost', credential_id='x', sign_count=0)
+        authenticated, request = self._authenticate()
+        assert authenticated is None
+        assert CookieBackend.get_part_login(request) == user.username
+
+    def test_a_passkey_for_another_host_does_not_count(self):
+        user = self.create_user()
+        WebauthnCredential.objects.create(user=user, rp_id='elsewhere.example', credential_id='x', sign_count=0)
+        authenticated, _request = self._authenticate()
+        assert authenticated == user
