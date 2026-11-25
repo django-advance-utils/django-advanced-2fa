@@ -933,3 +933,29 @@ class PasskeyOnlyUserTest(UserMixin, TestCase):
         WebauthnCredential.objects.create(user=user, rp_id='elsewhere.example', credential_id='x', sign_count=0)
         authenticated, _request = self._authenticate()
         assert authenticated == user
+
+
+class LandingCustomise(CustomiseAuth):
+    # Referenced by override_settings as 'examples.tests.LandingCustomise'.
+    @staticmethod
+    def login_redirect_url(request):
+        return '/landing/'
+
+
+class LoginRedirectUrlTest(TestCase):
+    """A full-page sign-in with no ?next= lands where CustomiseAuth.login_redirect_url says."""
+
+    def _response(self):
+        from modal_2fa.auth import SuccessRedirectMixin
+
+        view = SuccessRedirectMixin()
+        view.request = RequestFactory().post('/auth/2FA/', {'modal_type': 'no-parent'})
+        view.command_response = lambda command, **kwargs: (command, kwargs)
+        return view.success_response()
+
+    def test_default_is_the_setting(self):
+        assert self._response() == ('redirect', {'url': settings.LOGIN_REDIRECT_URL})
+
+    @override_settings(AUTHENTICATION_CUSTOMISATION='examples.tests.LandingCustomise')
+    def test_the_hook_decides(self):
+        assert self._response() == ('redirect', {'url': '/landing/'})

@@ -54,7 +54,7 @@ class SuccessRedirectMixin:
             return self.command_response('redirect', url=safe_next)
         elif self.request.POST.get('modal_type') == 'no-parent':
             # noinspection PyUnresolvedReferences
-            return self.command_response('redirect', url=settings.LOGIN_REDIRECT_URL)
+            return self.command_response('redirect', url=get_custom_auth().login_redirect_url(self.request))
         else:
             # noinspection PyUnresolvedReferences
             return self.command_response('reload')

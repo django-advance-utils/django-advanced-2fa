@@ -27,6 +27,7 @@ class CustomiseAuth(MicrosoftCustomiseMixin):
       - ``allowed_remember(user) -> bool``        @staticmethod  — show the "remember this device" option
       - ``max_cookies(user) -> int``            @staticmethod  — max trusted devices per user (default 2)
       - ``remember_days(user, request=None) -> int``  @staticmethod  — days a trusted device skips 2FA (default 365)
+      - ``login_redirect_url(request) -> str``  @staticmethod  — where a full-page sign-in lands with no ?next=
       - ``webauthn_rp_id(request) -> str``      @staticmethod  — WebAuthn relying party id (default WEBAUTHN_RP_ID)
       - ``webauthn_rp_name(request) -> str``    @staticmethod  — name the authenticator shows (default WEBAUTHN_RP_NAME)
       - ``is_ip_excluded(ip) -> bool``          @classmethod   — exempt an IP/CIDR from the shared-IP lockout
@@ -206,6 +207,12 @@ class CustomiseAuth(MicrosoftCustomiseMixin):
         on time. Shortening it ends trust for devices already older than the new length.
         """
         return 365
+
+    @staticmethod
+    def login_redirect_url(request):
+        """Where a sign-in made on a page of its own lands when no ``?next=`` was carried in
+        (default ``settings.LOGIN_REDIRECT_URL``). Override for a site whose areas each have a home of their own."""
+        return settings.LOGIN_REDIRECT_URL
 
     @staticmethod
     def webauthn_rp_id(request):
