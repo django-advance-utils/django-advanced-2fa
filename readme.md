@@ -58,7 +58,9 @@ For the optional Microsoft sign-in, install the extra (pulls in `msal`):
 > admin, use `modal_2fa_apps` instead, which omits the admin replacement.)
 
 WebAuthn requires a secure context, so register/authenticate over HTTPS in
-production (`localhost` is exempt for development).
+production. `localhost` and its subdomains (`tenant.app.localhost`) are exempt, so
+passkeys work over plain http in development. On a subdomain, give each host its own
+RP ID (the host itself, from your auth class's `webauthn_rp_id`) rather than `localhost`.
 
 ### URLs
 

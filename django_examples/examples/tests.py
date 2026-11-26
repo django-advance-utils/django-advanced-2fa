@@ -1149,9 +1149,19 @@ class WebAuthnOriginTest(TestCase):
         return view.get_origin()
 
     @override_settings(ALLOWED_HOSTS=['*'])
-    def test_origins(self):
+    def test_localhost_and_its_subdomains_may_use_http(self):
+        assert self._origin('localhost') == 'http://localhost'
         assert self._origin('localhost:8000') == 'http://localhost:8000'
         assert self._origin('tenant.app.localhost:8001') == 'http://tenant.app.localhost:8001'
-        assert self._origin('example.com') == 'https://example.com'
-        assert self._origin('localhost.example.com') == 'https://localhost.example.com'
+
+    @override_settings(ALLOWED_HOSTS=['*'])
+    def test_every_other_host_is_https(self):
+        for host in ('example.com', 'localhost.example.com', 'localhost.example.com:8000', 'evil-localhost.com',
+                     'notlocalhost', 'localhost.', 'tenant.localhost.', '[::1]:8000'):
+            with self.subTest(host=host):
+                assert self._origin(host) == 'https://' + host
+
+    @override_settings(ALLOWED_HOSTS=['*'])
+    def test_a_secure_request_is_https_even_on_localhost(self):
+        assert self._origin('localhost', secure=True) == 'https://localhost'
         assert self._origin('tenant.app.localhost', secure=True) == 'https://tenant.app.localhost'
